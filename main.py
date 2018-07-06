@@ -41,20 +41,32 @@ import z3
 
 def make_variable(t, var):
     if t == 'int':
-        return z3.BitVec(var, 32)
+        return z3.Int(var)
     print(t)
     assert(False)
 
 class Context:
-    def __init__(self, prev):
-        self.vars = {}
+    def __init__(self, prev, cond = None):
+        if cond is None:
+            self.vars = {}
+            self.func = {}
+        else:
+            self.vars = prev.vars
+            self.func = prev.func
         self.prev = prev
-        self.func = {}
-        self.ifcond = None
+        self.ifcond = cond
 
     def cond(self, icond):
-        self.ifcond = icond
-        return self
+        return Context(self, icond)
+
+    def solve_now(self):
+        s = z3.Solver()
+        s.reset()
+        print(self.vars)
+        for k, var in self.vars.items():
+            print(k)
+            s.add(make_variable(var['t'], k) == var['v'])
+        return s
 
 def process_decl(node):
     var_name = node.name
@@ -72,6 +84,7 @@ def process_node(node, context):
         return None
     t = type(node)
     print(t)
+    r = None
     if t is c_ast.FuncDef:
         new_context = Context(context)
         # return type process
@@ -81,6 +94,9 @@ def process_node(node, context):
         return process_node(node.body, new_context)
     elif t is c_ast.ParamList:
         for var in node.params:
+            process_node(var, context)
+    elif t is c_ast.DeclList:
+        for var in node.decls:
             process_node(var, context)
     elif t is c_ast.Decl:
         var_name = node.name
@@ -101,13 +117,29 @@ def process_node(node, context):
         node.show()
     elif t is c_ast.If:
         cond = process_node(node.cond, context)
-        r = z3.If(cond, process_node(node.iftrue, context.cond(cond)),
-            process_node(node.iffalse, context.cond(cond)))
-        context.cond = None
+        true_r = process_node(node.iftrue, context.cond(cond))
+        false_r = process_node(node.iffalse, context.cond(z3.Not(cond)))
+        if true_r is not None and false_r is not None:
+            r = z3.If(cond, true_r, false_r)
         return r
+    elif t is c_ast.For:
+        process_node(node.init, context)
+        cond = process_node(node.cond, context)
+        s = context.solve_now()
+        s.add(cond)
+        while True:
+            if s.check() == z3.unsat:
+                break
+            process_node(node.stmt, context.cond(cond))
+            process_node(node.next, context.cond(cond))
+            cond = process_node(node.cond, context)
+            s = context.solve_now()
+            s.add(cond)
+
     elif t is c_ast.Assignment:
         assign = process_node(node.rvalue, context)
         old_value = context.vars[node.lvalue.name]['v']
+        # should we swap the if condition?
         if context.ifcond is not None:
             context.vars[node.lvalue.name]['v'] = z3.If(context.ifcond, assign, old_value)
         else:
@@ -117,33 +149,26 @@ def process_node(node, context):
         return 0, process_node(node.expr, context)
     elif t is c_ast.BinaryOp:
         r = None
+        lr = process_node(node.left, context)
+        rr = process_node(node.right, context)
         if node.op == "+":
-            r = process_node(node.left, context) + \
-            process_node(node.right, context)
+            r = lr + rr
         elif node.op == "-":
-            r = process_node(node.left, context) - \
-            process_node(node.right, context)
+            r = lr - rr
         elif node.op == "<<":
-            r = process_node(node.left, context) << \
-            process_node(node.right, context)
+            r = lr << rr
         elif node.op == ">>":
-            r = process_node(node.left, context) >> \
-            process_node(node.right, context)
+            r = lr >> rr
         elif node.op == "&":
-            r = process_node(node.left, context) & \
-            process_node(node.right, context)
+            r = lr & rr
         elif node.op == "|":
-            r = process_node(node.left, context) | \
-            process_node(node.right, context)
+            r = lr | rr
         elif node.op == "^":
-            r = process_node(node.left, context) ^ \
-            process_node(node.right, context)
+            r = lr ^ rr
         elif node.op == "&&":
-            r = z3.And(process_node(node.left, context),
-                process_node(node.right, context))
+            r = z3.And(lr, rr)
         elif node.op == "||":
-            r = z3.Or(process_node(node.left, context),
-                process_node(node.right, context))
+            r = z3.Or(lr, rr)
         # elif node.op == "*":
         #     r = process_node(node.left, context) * \
         #     process_node(node.right, context)
@@ -151,20 +176,18 @@ def process_node(node, context):
         #     r = process_node(node.left, context) / \
         #     process_node(node.right, context)
         elif node.op == "==":
-            r = process_node(node.left, context) == \
-            process_node(node.right, context)
+            r = lr == rr
         elif node.op == "<":
-            r = process_node(node.left, context) < \
-            process_node(node.right, context)
+            print("enter")
+            print(lr)
+            print(rr)
+            return lr < rr
         elif node.op == "<=":
-            r = process_node(node.left, context) <= \
-            process_node(node.right, context)
+            r = lr <= rr
         elif node.op == ">":
-            r = process_node(node.left, context) > \
-            process_node(node.right, context)
+            r = lr > rr
         elif node.op == ">=":
-            r = process_node(node.left, context) >= \
-            process_node(node.right, context)
+            r = lr >= rr
         else:
             print(node.op)
             assert(False)
@@ -175,7 +198,7 @@ def process_node(node, context):
         elif node.op == "~":
             return ~process_node(node.expr, context)
     elif t is c_ast.Constant:
-        return make_variable(node.type, node.value)
+        return int(node.value)
     elif t is c_ast.ID:
         v = None
         if node.name in context.vars:
