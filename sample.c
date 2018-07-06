@@ -1,5 +1,3 @@
-void swap(int *a, int *b) {
-    int tmp = *a;
-    *a = *b;
-    *b = tmp;
+int swap(int *a, int b, int c, int d, int e) {
+    return *a + b + c + d;
 }

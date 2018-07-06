@@ -38,11 +38,82 @@ from pycparser import c_parser, c_ast
 # a ParseError if there's an error in the code
 #
 
-with open("sample.c", 'r') as f:
-    text = f.read()
 
-parser = c_parser.CParser()
-ast = parser.parse(text, filename='sample.c')
+class Context:
+    def __init__(self, prev):
+        self.vars = {}
+        self.prev = prev
+        self.func = {}
 
-func = ast.ext[0].show()
+def process_decl(node):
+    var_name = node.name
+    var_type = node.type
+    # var_value = process_node(node.init, context)
+    print(var_name)
+    return {
+        'name': var_name,
+        'type': var_type,
+        'value': var_name
+    }
+
+def process_node(node, context):
+    if node is None:
+        return None
+    t = type(node)
+    print(t)
+    if t is c_ast.FuncDef:
+        new_context = Context(context)
+        # return type process
+        # process_node(node.decl.type.args, new_context)
+        context.func[node.decl.type.type.declname] = node.decl.type.type.type
+        process_node(node.decl.type.args, new_context)
+        return process_node(node.body, new_context)
+    elif t is c_ast.ParamList:
+        for var in node.params:
+            process_node(var, context)
+    elif t is c_ast.Decl:
+        var_name = node.name
+        var_type = node.type
+        # var_value = process_node(node.init, context)
+        context.vars[var_name] = {
+            't': var_type,
+            'v': var_name
+        }
+    elif t is c_ast.Compound:
+        # process a list of statement and 
+        # get the return value
+        for item in node.block_items:
+            ret = process_node(item, context)
+            if ret is not None:
+                return ret
+    elif t is c_ast.ParamList:
+        node.show()
+    elif t is c_ast.Assignment:
+        print(type(node.lvalue))
+    elif t is c_ast.Return:
+        return process_node(node.expr, context)
+    elif t is c_ast.BinaryOp:
+        return process_node(node.left, context) + \
+            node.op + process_node(node.right, context)
+    elif t is c_ast.ID:
+        v = ""
+        if node.name in context.vars:
+            v = context.vars[node.name]['v']
+        return v
+    else:
+        print(type(node))
+        print("should not reach here\n")
+    return None
+
+if __name__ == "__main__":
+    with open("sample.c", 'r') as f:
+        text = f.read()
+
+    parser = c_parser.CParser()
+    ast = parser.parse(text, filename='sample.c')
+    ast.ext[0].show()
+    print("\n------------------\n")
+    r = process_node(ast.ext[0], Context(None))
+    print(r)
+# func = 
 # ast.show(showcoord=True)
