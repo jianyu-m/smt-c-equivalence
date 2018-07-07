@@ -218,6 +218,8 @@ def process_node(node, context):
         elif node.op == "~":
             return ~process_node(node.expr, context)
     elif t is c_ast.Constant:
+        if node.value[0] == '\'':
+            return ord(node.value[1])
         return int(node.value)
     elif t is c_ast.ID:
         v = None
