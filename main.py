@@ -42,7 +42,6 @@ import z3
 def make_variable(t, var):
     if t == 'int':
         return z3.Int(var)
-    print(t)
     assert(False)
 
 class Context:
@@ -54,7 +53,10 @@ class Context:
             self.vars = prev.vars
             self.func = prev.func
         self.prev = prev
-        self.ifcond = cond
+        if prev is not None and prev.ifcond is not None:
+            self.ifcond = z3.And(prev.ifcond, cond)
+        else:
+            self.ifcond = cond
 
     def cond(self, icond):
         return Context(self, icond)
@@ -62,9 +64,7 @@ class Context:
     def solve_now(self):
         s = z3.Solver()
         s.reset()
-        print(self.vars)
         for k, var in self.vars.items():
-            print(k)
             s.add(make_variable(var['t'], k) == var['v'])
         return s
 
@@ -122,26 +122,49 @@ def process_node(node, context):
         if true_r is not None and false_r is not None:
             r = z3.If(cond, true_r, false_r)
         return r
+    elif t is c_ast.While:
+        cond = process_node(node.cond, context)
+        s = context.solve_now()
+        s.add(cond)
+        c = 0
+        while True:
+            if s.check() == z3.unsat:
+                break
+            c += 1
+            context = context.cond(cond)
+            process_node(node.stmt, context)
+            cond = process_node(node.cond, context)
+            s = context.solve_now()
+            s.add(cond)
+        print("unrolling " + str(c))
     elif t is c_ast.For:
         process_node(node.init, context)
         cond = process_node(node.cond, context)
         s = context.solve_now()
         s.add(cond)
+        c = 0
         while True:
             if s.check() == z3.unsat:
                 break
-            process_node(node.stmt, context.cond(cond))
-            process_node(node.next, context.cond(cond))
+            c += 1
+            context = context.cond(cond)
+            process_node(node.stmt, context)
+            process_node(node.next, context)
             cond = process_node(node.cond, context)
             s = context.solve_now()
             s.add(cond)
-
+        print("unrolling " + str(c))
     elif t is c_ast.Assignment:
         assign = process_node(node.rvalue, context)
         old_value = context.vars[node.lvalue.name]['v']
         # should we swap the if condition?
         if context.ifcond is not None:
-            context.vars[node.lvalue.name]['v'] = z3.If(context.ifcond, assign, old_value)
+            if context.ifcond == True:
+                context.vars[node.lvalue.name]['v'] = assign
+            elif context.ifcond == False:
+                context.vars[node.lvalue.name]['v'] = old_value
+            else:
+                context.vars[node.lvalue.name]['v'] = z3.If(context.ifcond, assign, old_value)
         else:
             context.vars[node.lvalue.name]['v'] = assign
         return assign
@@ -178,9 +201,6 @@ def process_node(node, context):
         elif node.op == "==":
             r = lr == rr
         elif node.op == "<":
-            print("enter")
-            print(lr)
-            print(rr)
             return lr < rr
         elif node.op == "<=":
             r = lr <= rr
@@ -221,7 +241,8 @@ if __name__ == "__main__":
     print("\n------------------\n")
     r = process_node(ast.ext[0], Context(None))
     solver = z3.Solver()
-    solver.add(r != r)
+    solver.add(r != 1)
+    solver.add(r != 45)
     print(r)
     print(solver.check())
 # func = 
