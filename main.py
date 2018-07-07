@@ -44,6 +44,13 @@ def make_variable(t, var):
         return z3.Int(var)
     assert(False)
 
+def unpack_variable(t):
+    ptr_layer = 0
+    while type(t) is c_ast.PtrDecl:
+        ptr_layer = ptr_layer + 1
+        t = t.type
+    return (ptr_layer, t)
+
 class Memory:
     def __init__(self):
         self.mem = {}
@@ -60,9 +67,15 @@ class Memory:
             self.mem[index] = None
 
     def set(self, index, value):
+        if self.mem[index] is None:
+            print("out of bound")
+            assert(False)
         self.mem[index] = value
 
     def get(self, index):
+        if index not in self.mem:
+            print("out of bound")
+            assert(False)
         return self.mem[index]
 
 class Stack(Memory):
@@ -90,6 +103,7 @@ class Context:
         self.prev = prev
         self.heap = prev.heap if heap is None else heap
         self.stack = prev.stack if stack is None else stack
+        self.reference = False
         if prev is not None and prev.ifcond is not None:
             if cond is True:
                 self.ifcond = prev.ifcond
@@ -100,6 +114,14 @@ class Context:
 
     def cond(self, icond):
         return Context(self, icond)
+
+    def lvalue(self):
+        self.reference = True
+        return self
+
+    def reset_lvalue(self):
+        self.reference = False
+
 
     def solve_now(self):
         s = z3.Solver()
@@ -140,14 +162,18 @@ def process_node(node, context):
             process_node(var, context)
     elif t is c_ast.Decl:
         var_name = node.name
-        var_type = node.type.type.names[0]
+        var_unpack = unpack_variable(node.type)
+        var_type = var_unpack[1].type.names[0]
+        var_ptr_layer = var_unpack[0]
+        # var_type = node.type.type.names[0]
         var_value = process_node(node.init, context)
         var_init = make_variable(var_type, var_name) if var_value is None else var_value
         mem_idx = context.stack.malloc()
         context.stack.set(mem_idx, var_init)
         context.vars[var_name] = {
             't': var_type,
-            'v': mem_idx
+            'v': mem_idx,
+            'ptr': var_ptr_layer
         }
     elif t is c_ast.Compound:
         # process a list of statement and 
@@ -199,8 +225,12 @@ def process_node(node, context):
         print("unrolling " + str(c))
     elif t is c_ast.Assignment:
         assign = process_node(node.rvalue, context)
-        value_idx = context.vars[node.lvalue.name]['v']
-        old_value = context.stack.get(value_idx)
+        value_idx, old_value = process_node(node.lvalue, context.lvalue())
+        context.reset_lvalue()
+        if node.op == "+=":
+            assign = old_value + assign
+        elif node.op == "-=":
+            assign = old_value - assign
         # should we swap the if condition?
         if context.ifcond is not None:
             if context.ifcond == True:
@@ -257,10 +287,31 @@ def process_node(node, context):
             assert(False)
         return r
     elif t is c_ast.UnaryOp:
+        u_expr = process_node(node.expr, context)
         if node.op == "!":
-            return z3.Not(process_node(node.expr, context))
+            return z3.Not(u_expr)
         elif node.op == "~":
-            return ~process_node(node.expr, context)
+            return ~u_expr
+        elif node.op == "&":
+            idx, v = process_node(node.expr, context.lvalue())
+            context.reset_lvalue()
+            return idx
+        elif node.op == "*":
+            if context.reference:
+                if type(u_expr) is tuple:
+                    ptr = context.stack.get(u_expr[0])
+                    return ptr, context.stack.get(ptr)
+                else:
+                    assert(False)
+            ptr = context.stack.get(u_expr)
+            return context.stack.get(ptr)
+        elif node.op == "p++":
+            idx, v = process_node(node.expr, context.lvalue())
+            context.reset_lvalue()
+            context.stack.set(idx, v + 1)
+            return u_expr
+        else:
+            assert(False)
     elif t is c_ast.Constant:
         if node.value[0] == '\'':
             return ord(node.value[1])
@@ -272,6 +323,8 @@ def process_node(node, context):
             idx = context.vars[node.name]['v']
         else:
             assert(False)
+        if context.reference:
+            return idx, context.stack.get(idx)
         return context.stack.get(idx)
     else:
         print(type(node))
@@ -288,8 +341,7 @@ if __name__ == "__main__":
     print("\n------------------\n")
     r = process_node(ast.ext[0], Context(None, heap = Memory(), stack = Stack()))
     solver = z3.Solver()
-    solver.add(r != 1)
-    solver.add(r != 45)
+    solver.add(r != r)
     print(r)
     print(solver.check())
 # func = 
