@@ -44,8 +44,43 @@ def make_variable(t, var):
         return z3.Int(var)
     assert(False)
 
+class Memory:
+    def __init__(self):
+        self.mem = {}
+        self.count = 0
+    def malloc(self):
+        index = self.count
+        self.count = index + 1
+        # use None to mark a value is deallocated
+        self.mem[index] = 0
+        return index
+
+    def free(self, index):
+        if index in self.mem:
+            self.mem[index] = None
+
+    def set(self, index, value):
+        self.mem[index] = value
+
+    def get(self, index):
+        return self.mem[index]
+
+class Stack(Memory):
+    def __init__(self):
+        super().__init__()
+        self.current_stack_start = 0
+    
+    def push_stack(self):
+        self.current_stack_start = self.count
+        return self
+
+    def pop_stack(self):
+        for i in range(self.count - self.current_stack_start):
+            self.free(i + self.current_stack_start)
+        return self
+
 class Context:
-    def __init__(self, prev, cond = None):
+    def __init__(self, prev, cond = None, heap = None, stack = None):
         if cond is None:
             self.vars = {}
             self.func = {}
@@ -53,8 +88,13 @@ class Context:
             self.vars = prev.vars
             self.func = prev.func
         self.prev = prev
+        self.heap = prev.heap if heap is None else heap
+        self.stack = prev.stack if stack is None else stack
         if prev is not None and prev.ifcond is not None:
-            self.ifcond = z3.And(prev.ifcond, cond)
+            if cond is True:
+                self.ifcond = prev.ifcond
+            else:
+                self.ifcond = z3.And(prev.ifcond, cond)
         else:
             self.ifcond = cond
 
@@ -102,9 +142,12 @@ def process_node(node, context):
         var_name = node.name
         var_type = node.type.type.names[0]
         var_value = process_node(node.init, context)
+        var_init = make_variable(var_type, var_name) if var_value is None else var_value
+        mem_idx = context.stack.malloc()
+        context.stack.set(mem_idx, var_init)
         context.vars[var_name] = {
             't': var_type,
-            'v': make_variable(var_type, var_name) if var_value is None else var_value
+            'v': mem_idx
         }
     elif t is c_ast.Compound:
         # process a list of statement and 
@@ -156,17 +199,18 @@ def process_node(node, context):
         print("unrolling " + str(c))
     elif t is c_ast.Assignment:
         assign = process_node(node.rvalue, context)
-        old_value = context.vars[node.lvalue.name]['v']
+        value_idx = context.vars[node.lvalue.name]['v']
+        old_value = context.stack.get(value_idx)
         # should we swap the if condition?
         if context.ifcond is not None:
             if context.ifcond == True:
-                context.vars[node.lvalue.name]['v'] = assign
+                context.stack.set(value_idx, assign)
             elif context.ifcond == False:
-                context.vars[node.lvalue.name]['v'] = old_value
+                context.stack.set(value_idx, old_value)
             else:
-                context.vars[node.lvalue.name]['v'] = z3.If(context.ifcond, assign, old_value)
+                context.stack.set(value_idx, z3.If(context.ifcond, assign, old_value))
         else:
-            context.vars[node.lvalue.name]['v'] = assign
+            context.stack.set(value_idx, assign)
         return assign
     elif t is c_ast.Return:
         return 0, process_node(node.expr, context)
@@ -223,11 +267,12 @@ def process_node(node, context):
         return int(node.value)
     elif t is c_ast.ID:
         v = None
+        idx = -1
         if node.name in context.vars:
-            v = context.vars[node.name]['v']
+            idx = context.vars[node.name]['v']
         else:
             assert(False)
-        return v
+        return context.stack.get(idx)
     else:
         print(type(node))
         assert(False)
@@ -241,7 +286,7 @@ if __name__ == "__main__":
     ast = parser.parse(text, filename='sample.c')
     ast.ext[0].show()
     print("\n------------------\n")
-    r = process_node(ast.ext[0], Context(None))
+    r = process_node(ast.ext[0], Context(None, heap = Memory(), stack = Stack()))
     solver = z3.Solver()
     solver.add(r != 1)
     solver.add(r != 45)
